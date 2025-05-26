@@ -25,40 +25,40 @@
 ;; Input validation functions
 (define-private (validate-project-code (project_code (string-ascii 255)))
     (begin
-        (ok true)))(asserts! (>= (len project_code) u3) (err "Project code too short"))
-        (asserts! (<= (len project_code) u255) (err "Project code too long"))
-        (asserts! (is-eq (index-of project_code ".") none) (err "Invalid character: ."))
-        (asserts! (is-eq (index-of project_code "/") none) (err "Invalid character: /"))
-        (asserts! (is-eq (index-of project_code " ") none) (err "Invalid character: space"))
-        (ok true)))
+        (asserts! (>= (len project_code) u3) ERR_MALFORMED_PROJECT_CODE)
+        (asserts! (<= (len project_code) u255) ERR_MALFORMED_PROJECT_CODE)
+        (asserts! (is-eq (index-of project_code ".") none) ERR_MALFORMED_PROJECT_CODE)
+        (asserts! (is-eq (index-of project_code "/") none) ERR_MALFORMED_PROJECT_CODE)
+        (asserts! (is-eq (index-of project_code " ") none) ERR_MALFORMED_PROJECT_CODE)
+        (ok project_code)))
 
 (define-private (validate-emission-certificate (carbon_certificate (string-ascii 50)))
     (begin
-        (asserts! (>= (len carbon_certificate) u5) (err "Carbon certificate too short"))
-        (asserts! (<= (len carbon_certificate) u50) (err "Carbon certificate too long"))
-        (asserts! (is-eq (index-of carbon_certificate "<") none) (err "Invalid character: <"))
-        (asserts! (is-eq (index-of carbon_certificate ">") none) (err "Invalid character: >"))
-        (ok true)))
+        (asserts! (>= (len carbon_certificate) u5) ERR_INVALID_EMISSION_DATA)
+        (asserts! (<= (len carbon_certificate) u50) ERR_INVALID_EMISSION_DATA)
+        (asserts! (is-eq (index-of carbon_certificate "<") none) ERR_INVALID_EMISSION_DATA)
+        (asserts! (is-eq (index-of carbon_certificate ">") none) ERR_INVALID_EMISSION_DATA)
+        (ok carbon_certificate)))
 
 (define-private (validate-impact-documentation (impact_report (string-ascii 500)))
     (begin
-        (asserts! (>= (len impact_report) u10) (err "Impact documentation too short"))
-        (asserts! (<= (len impact_report) u500) (err "Impact documentation too long"))
-        (asserts! (is-eq (index-of impact_report "<") none) (err "Invalid character: <"))
-        (asserts! (is-eq (index-of impact_report ">") none) (err "Invalid character: >"))
-        (ok true)))
+        (asserts! (>= (len impact_report) u10) ERR_INSUFFICIENT_DOCUMENTATION)
+        (asserts! (<= (len impact_report) u500) ERR_INSUFFICIENT_DOCUMENTATION)
+        (asserts! (is-eq (index-of impact_report "<") none) ERR_INSUFFICIENT_DOCUMENTATION)
+        (asserts! (is-eq (index-of impact_report ">") none) ERR_INSUFFICIENT_DOCUMENTATION)
+        (ok impact_report)))
 
 (define-private (validate-carbon-efficiency (emission_reduction uint))
     (begin
-        (asserts! (>= emission_reduction u1) (err "Emission reduction too low"))
-        (asserts! (<= emission_reduction u100) (err "Emission reduction too high"))
-        (ok true)))
+        (asserts! (>= emission_reduction u1) ERR_INVALID_CARBON_RATING)
+        (asserts! (<= emission_reduction u100) ERR_INVALID_CARBON_RATING)
+        (ok emission_reduction)))
 
 (define-private (validate-standard-compliance (compliance_tier uint))
     (begin
-        (asserts! (>= compliance_tier u1) (err "Compliance tier too low"))
-        (asserts! (<= compliance_tier u10) (err "Compliance tier too high"))
-        (ok true)))
+        (asserts! (>= compliance_tier u1) ERR_INVALID_STANDARD_LEVEL)
+        (asserts! (<= compliance_tier u10) ERR_INVALID_STANDARD_LEVEL)
+        (ok compliance_tier)))
 
 ;; Administrative state variables
 (define-data-var platform_coordinator principal tx-sender)
@@ -124,17 +124,25 @@
 
 ;; Query functions
 (define-read-only (get-project-compliance-status (project_code (string-ascii 255)))
-    (match (map-get? registered_carbon_projects {project_code: project_code})
-        project_details (ok project_details)
-        (err ERR_PROJECT_UNKNOWN)))
+    (let ((validated_project_code (unwrap! (validate-project-code project_code) ERR_MALFORMED_PROJECT_CODE)))
+        (match (map-get? registered_carbon_projects {project_code: validated_project_code})
+            project_details (ok project_details)
+            ERR_PROJECT_UNKNOWN)))
 
-(define-read-only (has_fraud_allegations (project_code (string-ascii 255)))
-    (is-some (map-get? fraud_allegation_cases {project_code: project_code})))
+(define-read-only (has-fraud-allegations (project_code (string-ascii 255)))
+    (let ((validated_project_code (unwrap! (validate-project-code project_code) ERR_MALFORMED_PROJECT_CODE)))
+        (ok (is-some (map-get? fraud_allegation_cases {project_code: validated_project_code})))))
 
 (define-read-only (get-auditor-professional-rating (auditor_address principal))
-    (match (map-get? auditor_project_assignments {auditor_address: auditor_address, assigned_project: ""})
-        auditor_record (get auditor_credibility auditor_record)
-        u0))
+    (match (map-get? carbon_auditor_registry {auditor_address: auditor_address})
+        auditor_record (ok (get professional_rating auditor_record))
+        (ok u0)))
+
+(define-read-only (get-fraud-allegation-details (project_code (string-ascii 255)))
+    (let ((validated_project_code (unwrap! (validate-project-code project_code) ERR_MALFORMED_PROJECT_CODE)))
+        (match (map-get? fraud_allegation_cases {project_code: validated_project_code})
+            allegation_details (ok allegation_details)
+            ERR_PROJECT_UNKNOWN)))
 
 ;; Core operations
 (define-public (register-carbon-project 
@@ -142,31 +150,34 @@
     (carbon_certificate (string-ascii 50)))
     (let (
         (current_timestamp (unwrap-panic (get-block-info? time (- block-height u1))))
-        (required_bond (* MINIMUM_AUDITOR_BOND (var-get global_compliance_standard))))
+        (required_bond (* MINIMUM_AUDITOR_BOND (var-get global_compliance_standard)))
+        (validated_project_code (unwrap! (validate-project-code project_code) ERR_MALFORMED_PROJECT_CODE))
+        (validated_certificate (unwrap! (validate-emission-certificate carbon_certificate) ERR_INVALID_EMISSION_DATA)))
         
-        ;; Input validation
-        (asserts! (is-ok (validate-project-code project_code)) ERR_MALFORMED_PROJECT_CODE)
-        (asserts! (is-ok (validate-emission-certificate carbon_certificate)) ERR_INVALID_EMISSION_DATA)
+        ;; Access control and system checks
         (asserts! (is-eq tx-sender (var-get platform_coordinator)) ERR_ACCESS_DENIED)
+        (asserts! (not (var-get platform_maintenance_mode)) ERR_PLATFORM_OFFLINE)
         (asserts! (>= (stx-get-balance tx-sender) required_bond) ERR_INSUFFICIENT_BONDS)
         
-        (match (map-get? registered_carbon_projects {project_code: project_code})
-            existing_project ERR_PROJECT_DUPLICATE
-            (begin
-                (try! (stx-transfer? required_bond tx-sender (as-contract tx-sender)))
-                (map-set registered_carbon_projects
-                    {project_code: project_code}
-                    {
-                        project_developer: tx-sender,
-                        compliance_tier: "certified",
-                        registration_timestamp: current_timestamp,
-                        greenwashing_risk_score: u0,
-                        total_fraud_allegations: u0,
-                        auditor_bond_locked: required_bond,
-                        last_impact_assessment: current_timestamp,
-                        carbon_certificate: carbon_certificate
-                    })
-                (ok true)))))
+        ;; Check for duplicate project - using validated project code
+        (asserts! (is-none (map-get? registered_carbon_projects {project_code: validated_project_code})) 
+                  ERR_PROJECT_DUPLICATE)
+        
+        ;; Transfer bond and register project
+        (try! (stx-transfer? required_bond tx-sender (as-contract tx-sender)))
+        (map-set registered_carbon_projects
+            {project_code: validated_project_code}
+            {
+                project_developer: tx-sender,
+                compliance_tier: "certified",
+                registration_timestamp: current_timestamp,
+                greenwashing_risk_score: u0,
+                total_fraud_allegations: u0,
+                auditor_bond_locked: required_bond,
+                last_impact_assessment: current_timestamp,
+                carbon_certificate: validated_certificate
+            })
+        (ok true)))
 
 (define-public (submit-fraud-allegation 
     (project_code (string-ascii 255)) 
@@ -174,113 +185,70 @@
     (fraud_likelihood uint))
     (let (
         (current_timestamp (unwrap-panic (get-block-info? time (- block-height u1))))
-        (auditor_record (default-to 
-            {assessment_count: u0, last_assessment_date: u0, auditor_credibility: u0, bonded_capital: u0, validated_assessments: u0}
-            (map-get? auditor_project_assignments {auditor_address: tx-sender, assigned_project: project_code}))))
+        (auditor_record (unwrap! (map-get? carbon_auditor_registry {auditor_address: tx-sender}) 
+                                ERR_INVALID_AUDITOR_CREDENTIALS))
+        (validated_project_code (unwrap! (validate-project-code project_code) ERR_MALFORMED_PROJECT_CODE))
+        (validated_evidence (unwrap! (validate-impact-documentation impact_evidence) ERR_INSUFFICIENT_DOCUMENTATION))
+        (validated_likelihood (unwrap! (validate-carbon-efficiency fraud_likelihood) ERR_INVALID_CARBON_RATING))
+        (project_exists (is-some (map-get? registered_carbon_projects {project_code: validated_project_code}))))
         
-        ;; Input validation
-        (asserts! (is-ok (validate-project-code project_code)) ERR_MALFORMED_PROJECT_CODE)
-        (asserts! (is-ok (validate-impact-documentation impact_evidence)) ERR_INSUFFICIENT_DOCUMENTATION)
-        (asserts! (is-ok (validate-carbon-efficiency fraud_likelihood)) ERR_INVALID_CARBON_RATING)
+        ;; System checks
         (asserts! (not (var-get platform_maintenance_mode)) ERR_PLATFORM_OFFLINE)
-        (asserts! (>= (get auditor_credibility auditor_record) REQUIRED_AUDITOR_CERTIFICATION) ERR_INSUFFICIENT_BONDS)
-        (asserts! (> (- current_timestamp (get last_assessment_date auditor_record)) ASSESSMENT_INTERVAL_SECONDS) ERR_ASSESSMENT_LOCKOUT)
+        (asserts! project_exists ERR_PROJECT_UNKNOWN)
+        (asserts! (>= (get professional_rating auditor_record) REQUIRED_AUDITOR_CERTIFICATION) 
+                  ERR_INVALID_AUDITOR_CREDENTIALS)
+        (asserts! (> (- current_timestamp (get last_audit_timestamp auditor_record)) ASSESSMENT_INTERVAL_SECONDS) 
+                  ERR_ASSESSMENT_LOCKOUT)
         
+        ;; Record fraud allegation
         (map-set fraud_allegation_cases
-            {project_code: project_code}
+            {project_code: validated_project_code}
             {
                 whistleblower_address: tx-sender,
                 allegation_timestamp: current_timestamp,
-                impact_evidence: impact_evidence,
+                impact_evidence: validated_evidence,
                 case_status: "investigating",
-                fraud_likelihood: fraud_likelihood,
+                fraud_likelihood: validated_likelihood,
                 stakeholder_count: u1
             })
         
+        ;; Update auditor assignment record
         (map-set auditor_project_assignments
-            {auditor_address: tx-sender, assigned_project: project_code}
+            {auditor_address: tx-sender, assigned_project: validated_project_code}
             {
-                assessment_count: (+ (get assessment_count auditor_record) u1),
+                assessment_count: u1,
                 last_assessment_date: current_timestamp,
-                auditor_credibility: (+ (get auditor_credibility auditor_record) u5),
-                bonded_capital: (get bonded_capital auditor_record),
-                validated_assessments: (get validated_assessments auditor_record)
+                auditor_credibility: (get professional_rating auditor_record),
+                bonded_capital: (get bonded_tokens auditor_record),
+                validated_assessments: u0
             })
+        
+        ;; Update project fraud count
+        (match (map-get? registered_carbon_projects {project_code: validated_project_code})
+            project_details 
+                (map-set registered_carbon_projects
+                    {project_code: validated_project_code}
+                    (merge project_details {
+                        total_fraud_allegations: (+ (get total_fraud_allegations project_details) u1)
+                    }))
+            false)
         (ok true)))
 
 (define-private (update-project-risk-assessment (project_code (string-ascii 255)) (risk_delta int))
-    (begin 
-        (asserts! (is-ok (validate-project-code project_code)) ERR_MALFORMED_PROJECT_CODE)
-        (match (map-get? registered_carbon_projects {project_code: project_code})
+    (let ((validated_project_code (unwrap! (validate-project-code project_code) ERR_MALFORMED_PROJECT_CODE)))
+        (match (map-get? registered_carbon_projects {project_code: validated_project_code})
             project_details 
                 (begin
-                    (map-set registered_carbon_projects
-                        {project_code: project_code}
-                        (merge project_details {
-                            greenwashing_risk_score: (+ (get greenwashing_risk_score project_details) 
-                                (if (> risk_delta 0) 
-                                    (to-uint risk_delta)
-                                    u0))
-                        }))
-                    (ok true))
+                    (let ((current_risk (get greenwashing_risk_score project_details))
+                          (new_risk (if (> risk_delta 0) 
+                                      (+ current_risk (to-uint risk_delta))
+                                      (if (>= current_risk (to-uint (- 0 risk_delta)))
+                                        (- current_risk (to-uint (- 0 risk_delta)))
+                                        u0))))
+                        (map-set registered_carbon_projects
+                            {project_code: validated_project_code}
+                            (merge project_details {
+                                greenwashing_risk_score: new_risk
+                            }))
+                        (ok true)))
             ERR_PROJECT_UNKNOWN)))
-
-(define-public (validate-fraud-allegation 
-    (project_code (string-ascii 255))
-    (allegation_confirmed bool))
-    (let (
-        (current_timestamp (unwrap-panic (get-block-info? time (- block-height u1))))
-        (auditor_profile (unwrap! (map-get? carbon_auditor_registry {auditor_address: tx-sender}) ERR_ACCESS_DENIED)))
-        
-        (asserts! (is-ok (validate-project-code project_code)) ERR_MALFORMED_PROJECT_CODE)
-        (asserts! (>= (get bonded_tokens auditor_profile) MINIMUM_AUDITOR_BOND) ERR_INSUFFICIENT_BONDS)
-        
-        (map-set carbon_auditor_registry
-            {auditor_address: tx-sender}
-            (merge auditor_profile {
-                completed_audits: (+ (get completed_audits auditor_profile) u1),
-                last_audit_timestamp: current_timestamp
-            }))
-        (if allegation_confirmed
-            (update-project-risk-assessment project_code 10)
-            (update-project-risk-assessment project_code -5))))
-
-(define-public (register-carbon-auditor (bond_amount uint))
-    (let (
-        (current_timestamp (unwrap-panic (get-block-info? time (- block-height u1)))))
-        (asserts! (>= bond_amount MINIMUM_AUDITOR_BOND) ERR_INSUFFICIENT_BONDS)
-        (asserts! (>= (stx-get-balance tx-sender) bond_amount) ERR_INSUFFICIENT_BONDS)
-        
-        (map-set carbon_auditor_registry
-            {auditor_address: tx-sender}
-            {
-                bonded_tokens: bond_amount,
-                completed_audits: u0,
-                professional_rating: u100,
-                last_audit_timestamp: current_timestamp,
-                auditor_standing: "certified"
-            })
-        (unwrap! (stx-transfer? bond_amount tx-sender (as-contract tx-sender))
-                 ERR_INSUFFICIENT_BONDS)
-        (ok true)))
-
-;; System management functions
-(define-public (update-compliance-standard (new_standard_level uint))
-    (begin
-        (asserts! (is-ok (validate-standard-compliance new_standard_level)) ERR_INVALID_STANDARD_LEVEL)
-        (asserts! (is-eq tx-sender (var-get platform_coordinator)) ERR_ACCESS_DENIED)
-        (var-set global_compliance_standard new_standard_level)
-        (ok true)))
-
-(define-public (set-platform-maintenance (maintenance_status bool))
-    (begin
-        (asserts! (is-eq tx-sender (var-get platform_coordinator)) ERR_ACCESS_DENIED)
-        (var-set platform_maintenance_mode maintenance_status)
-        (ok true)))
-
-(define-public (transfer_platform_coordination (new_coordinator principal))
-    (begin
-        (asserts! (is-eq tx-sender (var-get platform_coordinator)) ERR_ACCESS_DENIED)
-        (asserts! (not (is-eq new_coordinator 'SP000000000000000000002Q6VF78)) ERR_INVALID_AUDITOR_CREDENTIALS)
-        (var-set platform_coordinator new_coordinator)
-        (ok true)))
